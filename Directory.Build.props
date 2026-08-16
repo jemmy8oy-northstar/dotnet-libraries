@@ -1,0 +1,22 @@
+<Project>
+
+  <!-- Shared package identity. Every library in this repo ships from one place,
+       so the metadata that identifies the org lives here rather than in each
+       csproj. Version is overridden by the publish workflow (-p:Version=…). -->
+  <PropertyGroup>
+    <Authors>jemmy8oy-northstar</Authors>
+    <Company>Northstar</Company>
+    <RepositoryUrl>https://github.com/jemmy8oy-northstar/dotnet-libraries</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/jemmy8oy-northstar/dotnet-libraries</PackageProjectUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <Version>0.1.0</Version>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Roslyn loads analyzers into the compiler process, which runs on
+         netstandard2.0. This assembly is never part of a consumer's output. -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Northstar.SourceGenerators</PackageId>
+    <Description>
+      [GenerateInterface] — mirrors a concrete class's public surface into an
+      interface, so a contract and a domain model can share one generic base
+      without hand-written twins. Analyzer-only: nothing ships at runtime.
+    </Description>
+    <PackageTags>source-generator;roslyn;analyzer;interfaces</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+
+    <!-- An analyzer package carries no lib/ assembly, and must not drag Roslyn
+         into the consumer's dependency graph. -->
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <DevelopmentDependency>true</DevelopmentDependency>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Release tracking (RS2008). A published analyzer has to say which rule
+         IDs it owns and when they appeared, so a consumer can tell a new
+         diagnostic from a changed one. -->
+    <AdditionalFiles Include="AnalyzerReleases.Shipped.md" />
+    <AdditionalFiles Include="AnalyzerReleases.Unshipped.md" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- analyzers/dotnet/cs is the path the compiler looks in; get it wrong and
+         the package restores, builds, and generates nothing. scripts/verify-package.sh
+         packs and consumes the real .nupkg so that failure cannot ship silently. -->
+    <None Include="$(OutputPath)$(AssemblyName).dll"
+          Pack="true"
+          PackagePath="analyzers/dotnet/cs"
+          Visible="false" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
