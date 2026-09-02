@@ -8,6 +8,6 @@ namespace Northstar.SourceGenerators.Tests.Fixtures;
 /// cannot express, because a property type cannot be overridden.
 /// </summary>
 [GenerateInterface]
-public class DomainPerson : PersonBase<DomainAddr>, IDomainPerson
+public partial class DomainPerson : PersonBase<DomainAddr>, IDomainPerson
 {
 }

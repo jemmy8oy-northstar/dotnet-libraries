@@ -8,6 +8,6 @@ namespace Northstar.SourceGenerators.Tests.Fixtures;
 /// why marking it is enough and nothing here is hand-written.
 /// </summary>
 [GenerateInterface]
-public class Person : PersonBase<Addr>, IPerson
+public partial class Person : PersonBase<Addr>, IPerson
 {
 }

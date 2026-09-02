@@ -4,6 +4,6 @@ namespace Northstar.SourceGenerators.Tests.Fixtures;
 
 /// <summary>A tree node whose children are nodes of the same layer.</summary>
 [GenerateInterface]
-public class Node : NodeBase<Node>, INode
+public partial class Node : NodeBase<Node>, INode
 {
 }
