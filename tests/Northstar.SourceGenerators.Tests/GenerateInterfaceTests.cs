@@ -1,5 +1,6 @@
 using System.CodeDom.Compiler;
 using System.Reflection;
+using System.Text.Json;
 using Northstar.SourceGenerators.Tests.Fixtures;
 
 namespace Northstar.SourceGenerators.Tests;
@@ -251,4 +252,124 @@ public class GenerateInterfaceTests
 
         Assert.Equal("child", root.Children[0].Label);
     }
+
+    // ------------------------------------------ interfaces only in interfaces
+    // James, web-template#89: "why concrete addr here / Interfaces only in
+    // interfaces. The concretes will also just have interfaces as the attribute
+    // types. But in the service they can define the concrete which obviously
+    // inherits the interface."
+
+    [Fact]
+    public void A_property_at_a_mirrored_type_is_declared_at_the_interface_type()
+    {
+        Assert.Equal(typeof(IAddr), typeof(IOrder).GetProperty(nameof(Order.ShipTo))!.PropertyType);
+    }
+
+    [Fact]
+    public void The_class_keeps_the_concrete_property_so_it_still_deserialises()
+    {
+        // The whole reason for a bridge rather than an interface-typed field:
+        // System.Text.Json cannot pick a concrete type for an interface-typed
+        // property, but it ignores explicit implementations.
+        Assert.Equal(typeof(Addr), typeof(Order).GetProperty(nameof(Order.ShipTo))!.PropertyType);
+
+        var order = JsonSerializer.Deserialize<Order>(
+            """{"Reference":"A1","ShipTo":{"Line1":"12 High St"}}""")!;
+
+        Assert.Equal("12 High St", order.ShipTo.Line1);
+        Assert.Equal("""{"Reference":"A1","ShipTo":{"Line1":"12 High St"}}""", JsonSerializer.Serialize(order));
+    }
+
+    [Fact]
+    public void Reading_through_the_interface_hands_back_the_same_instance()
+    {
+        var order = new Order { ShipTo = new Addr { Line1 = "1 A St" } };
+        Assert.Same(order.ShipTo, ((IOrder)order).ShipTo);
+    }
+
+    [Fact]
+    public void Writing_a_foreign_implementation_through_the_interface_fails_loudly()
+    {
+        // The one real cost of this shape over closing the generic base over
+        // concrete types, where the same mistake is a compile error. Loud either
+        // way, and only code that WRITES through the interface can reach it.
+        IOrder order = new Order();
+        Assert.Throws<InvalidCastException>(() => order.ShipTo = new ForeignAddr());
+    }
+
+    [Fact]
+    public void A_method_return_is_widened_but_a_parameter_is_not()
+    {
+        // Asymmetric on purpose. A return is covariant, so the bridge only
+        // upcasts and cannot fail. A parameter is contravariant: declaring
+        // ShipsTo(IAddr) would promise Order accepts any IAddr when it accepts
+        // only Addr, and the bridge's narrowing cast would throw on every call
+        // from another implementation. The first build with parameters
+        // substituted turned Basic.Equals(Basic?) into Equals(IBasic?).
+        Assert.Equal(typeof(IAddr), typeof(IOrder).GetMethod(nameof(Order.Primary))!.ReturnType);
+        Assert.Equal(
+            typeof(Addr),
+            typeof(IOrder).GetMethod(nameof(Order.ShipsTo))!.GetParameters()[0].ParameterType);
+        Assert.Equal(
+            typeof(Basic),
+            typeof(IBasic).GetMethod(nameof(Basic.Equals), [typeof(Basic)])!.GetParameters()[0].ParameterType);
+    }
+
+    [Fact]
+    public void A_generic_base_is_closed_over_the_mirror_not_the_concrete()
+    {
+        // The shape James asked for: IPerson : IPersonBase<IAddr>.
+        Assert.Contains(typeof(IPersonBase<IAddr>), typeof(IPerson).GetInterfaces());
+        Assert.Contains(typeof(IPersonBase<IDomainAddr>), typeof(IDomainPerson).GetInterfaces());
+
+        // …and the layering still works through it, over each layer's own mirror.
+        IPersonBase<IDomainAddr> domain = new DomainPerson { Address = new DomainAddr { Line1 = "high st" } };
+        Assert.Equal("HIGH ST", domain.Address.Normalised());
+    }
+
+    [Fact]
+    public void A_covariant_generic_is_substituted_inside()
+    {
+        // IReadOnlyList<TNode> is covariant, so INodeBase can close over INode
+        // and the bridge's getter is a widening that cannot fail.
+        Assert.Equal(
+            typeof(IReadOnlyList<INode>),
+            typeof(INodeBase<INode>).GetProperty(nameof(Node.Children))!.PropertyType);
+    }
+
+    [Fact]
+    public void An_invariant_generic_keeps_the_concrete_type_argument()
+    {
+        // The limit of "interfaces only in interfaces", and the reason it is a
+        // measured fallback rather than a silent one (NSGEN004). List<Addr> and
+        // List<IAddr> are unrelated types, so an interface declaring
+        // List<IAddr> could not be bridged — the generated explicit
+        // implementation would not compile.
+        Assert.Contains(typeof(ICrateBase<Addr>), typeof(ICrate).GetInterfaces());
+        Assert.DoesNotContain(
+            typeof(ICrateBase<IAddr>),
+            typeof(ICrate).GetInterfaces().Where(i => i.IsGenericType));
+
+        // And with nothing substituted there is nothing to bridge, so the class
+        // does not have to be partial — the cost is only paid where it buys
+        // something. An explicit implementation is private; every member here
+        // maps to the public one, so no bridge was emitted.
+        Assert.All(
+            typeof(Crate).GetInterfaceMap(typeof(ICrateBase<Addr>)).TargetMethods,
+            m => Assert.True(m.IsPublic));
+
+        // The control: Order DOES get a bridge, so the same check comes out the
+        // other way. Without this the assertion above would pass on a generator
+        // that never emits a bridge at all.
+        Assert.Contains(
+            typeof(Order).GetInterfaceMap(typeof(IOrder)).TargetMethods,
+            m => m.IsPrivate);
+    }
+}
+
+/// <summary>Another IAddr the bridge has never seen — the foreign implementation
+/// that makes the write-through-the-interface cost observable.</summary>
+public sealed class ForeignAddr : IAddr
+{
+    public string Line1 { get; set; } = "";
 }
