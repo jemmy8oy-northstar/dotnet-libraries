@@ -338,6 +338,21 @@ public class GenerateInterfaceTests
     }
 
     [Fact]
+    public void Substitution_inside_a_generic_follows_that_generic_s_variance()
+    {
+        // Both on ONE class, so this is a statement about the rule and not about
+        // where the type happened to come from. Covariant widens; invariant does
+        // not, because List<Addr> and List<IAddr> have no conversion in either
+        // direction and the bridge would not compile.
+        Assert.Equal(
+            typeof(IReadOnlyList<IAddr>),
+            typeof(IManifest).GetProperty(nameof(Manifest.Stops))!.PropertyType);
+        Assert.Equal(
+            typeof(List<Addr>),
+            typeof(IManifest).GetProperty(nameof(Manifest.Crates))!.PropertyType);
+    }
+
+    [Fact]
     public void An_invariant_generic_keeps_the_concrete_type_argument()
     {
         // The limit of "interfaces only in interfaces", and the reason it is a
