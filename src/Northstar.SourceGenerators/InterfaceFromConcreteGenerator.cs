@@ -45,8 +45,14 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
         /// <remarks>
         /// The generator does NOT add the interface to the class's base list —
         /// write <c>: IMyClass</c> yourself, so the implements-relationship stays
-        /// visible in the source you read. The class need not be <c>partial</c>:
-        /// the generator writes a separate file and never modifies yours.
+        /// visible in the source you read.
+        /// <para>
+        /// The class need not be <c>partial</c> unless the generated interface
+        /// declares one of its members at an INTERFACE type — a property, or a
+        /// method return, whose type is itself marked. Then the generator writes
+        /// an explicit implementation into the class to join the two, and says so
+        /// with NSGEN003 rather than leaving you a CS0535.
+        /// </para>
         /// </remarks>
         [global::System.AttributeUsage(global::System.AttributeTargets.Class, Inherited = false, AllowMultiple = false)]
         [global::System.CodeDom.Compiler.GeneratedCode("Northstar.SourceGenerators", "1.0.0")]

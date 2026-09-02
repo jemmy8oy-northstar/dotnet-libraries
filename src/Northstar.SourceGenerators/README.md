@@ -44,7 +44,51 @@ Excluded: static and non-public members, constructors, operators, explicit
 interface implementations, and overrides of `object`'s virtuals — but *not* a
 user-defined overload that merely shares a name, e.g. `Equals(MyType)`.
 
-Diagnostics: `NSGEN001` nested class, `NSGEN002` static class.
+## Interfaces only in interfaces
+
+A generated interface refers to another **mirrored** type by its interface, not
+its concrete class. The class keeps the concrete member, and the generator writes
+an explicit implementation to join them — so `System.Text.Json`, which ignores
+explicit implementations, still round-trips the concrete property with no custom
+converter.
+
+```csharp
+[GenerateInterface]
+public partial class Order : IOrder    // partial: it gets a generated bridge
+{
+    public Addr ShipTo { get; set; } = new();   // concrete on the class
+}
+
+// generated
+public interface IOrder { IAddr ShipTo { get; set; } }
+public partial class Order
+{
+    IAddr IOrder.ShipTo { get => ShipTo; set => ShipTo = (Addr)value; }
+}
+```
+
+The same applies to a generic base's type arguments: `Person : PersonBase<Addr>`
+mirrors to `IPerson : IPersonBase<IAddr>`.
+
+**Where it stops, and why.**
+
+| Position | Substituted? | Reason |
+|---|---|---|
+| Property type | yes | bridged by an explicit implementation |
+| Method return type | yes | covariant — the bridge only widens |
+| Method parameter type | **no** | contravariant: `ShipsTo(IAddr)` would promise the class accepts any `IAddr` when it accepts only `Addr` |
+| Inside a covariant generic (`IReadOnlyList<out T>`) | yes | the widening is safe |
+| Inside an invariant generic (`List<T>`) | **no** (`NSGEN004`) | `List<Addr>` and `List<IAddr>` have no conversion either way, so the bridge would not compile |
+| Indexers, generic methods, events | no | a cast cannot express the mapping |
+
+The one cost over closing a generic base over concrete types: writing a *foreign*
+implementation through the interface is a compile error there and an
+`InvalidCastException` here. Only code that writes through the interface can
+reach it.
+
+Diagnostics: `NSGEN001` nested class, `NSGEN002` static class, `NSGEN003` a class
+needing a bridge is not `partial`, `NSGEN004` a generic base kept concrete type
+arguments.
 
 ## Consuming it
 
