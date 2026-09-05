@@ -7,3 +7,4 @@ Rule ID | Category | Severity | Notes
 --------|----------|----------|-------
 NSGEN001 | Northstar.SourceGenerators | Warning | [GenerateInterface] does not support nested classes
 NSGEN002 | Northstar.SourceGenerators | Warning | [GenerateInterface] cannot be applied to a static class
+NSGEN005 | Northstar.SourceGenerators | Warning | [GenerateInterface] would put a concrete type in a generated interface

@@ -42,16 +42,17 @@ public class Basic : IBasic
         where TItem : class
         => items.FirstOrDefault();
 
-    /// <summary>A user-defined overload that shares a name with an object virtual.</summary>
+    /// <summary>A user-defined overload that shares a name with an object virtual,
+    /// declared at the interface type like every other member here.</summary>
     /// <remarks>
     /// This must survive. Excluding object's virtuals by NAME would silently
     /// drop it from every model that defines one.
     /// </remarks>
-    public bool Equals(Basic? other) => other?.Name == Name;
+    public bool Equals(IBasic? other) => other?.Name == Name;
 
     public override string ToString() => Name;
 
-    public override bool Equals(object? obj) => Equals(obj as Basic);
+    public override bool Equals(object? obj) => Equals(obj as IBasic);
 
     public override int GetHashCode() => Name.GetHashCode();
 }

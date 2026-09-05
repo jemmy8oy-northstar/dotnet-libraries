@@ -22,6 +22,25 @@
          exercise the real Roslyn pipeline rather than comparing strings. -->
     <ProjectReference Include="..\..\src\Northstar.SourceGenerators\Northstar.SourceGenerators.csproj"
                       OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+
+    <!-- ...and referenced NORMALLY as well, so DiagnosticTests can drive it
+         over a source string. The fixtures can only ever exercise inputs that
+         COMPILE, which left every diagnostic untested: a mutation making the
+         NSGEN003 check always say "yes" survived the whole suite. -->
+    <ProjectReference Include="..\..\src\Northstar.SourceGenerators\Northstar.SourceGenerators.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Copied so a test can READ it. RS2000 already fails the analyzer build
+         for a rule missing from this file; this is the other direction — a rule
+         listed here that the generator no longer raises. -->
+    <None Include="..\..\src\Northstar.SourceGenerators\AnalyzerReleases.Unshipped.md"
+          Link="AnalyzerReleases.Unshipped.md"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
