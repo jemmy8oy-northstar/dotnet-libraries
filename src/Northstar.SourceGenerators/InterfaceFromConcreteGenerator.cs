@@ -664,8 +664,8 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
             return false;
         }
 
-        // Interfaces cannot declare fields, and an explicit implementation is
-        // already tied to another interface.
+        // Compiler-synthesised members (a record's EqualityContract, a property's
+        // backing field) are not part of the surface the author wrote.
         if (member.IsImplicitlyDeclared)
         {
             return false;
@@ -690,10 +690,12 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
                     return false;
                 }
 
-                if (method.ExplicitInterfaceImplementations.Length > 0)
-                {
-                    return false;
-                }
+                // NOTE: there is deliberately no ExplicitInterfaceImplementations
+                // check here. One would be dead code — an explicit implementation
+                // has DeclaredAccessibility == Private, so the accessibility guard
+                // at the top of this method has already returned false. Proved by
+                // deleting the guard that used to sit here: the whole suite stayed
+                // green, including the fixture that HAS an explicit implementation.
 
                 // object's virtuals are on every type; restating them in an
                 // interface is noise. Test what the method actually OVERRIDES,

@@ -424,8 +424,52 @@ public class GenerateInterfaceTests
         // member on ISignal that Signal does not publicly have. Covered by
         // accident until the bridge was deleted — the bridge WAS an explicit
         // implementation, on several fixtures at once.
+        //
+        // ⚠️ This passes because an explicit implementation is PRIVATE, not
+        // because of any explicit-implementation rule. The generator used to
+        // carry one; a mutation flipping its return changed nothing, and
+        // deleting it left the suite green, so it was dead code and is gone.
+        // The behaviour is real and asserted here; the mechanism is
+        // accessibility.
         Assert.DoesNotContain("Probe", MemberNames<ISignal>());
         Assert.Contains("Raise", MemberNames<ISignal>());
+    }
+
+    // Both tests below assert real behaviour, and NEITHER kills the mutant it was
+    // written for. That is the finding, so it is recorded rather than hidden: the
+    // two rules are each enforced twice, and a mutation to the first enforcement
+    // is invisible because the second still holds. Measured, not assumed — each
+    // mutant was re-applied by hand after these tests existed, and the suite
+    // stayed green at 54.
+
+    [Fact]
+    public void An_override_of_a_non_object_virtual_is_still_mirrored()
+    {
+        // The exclusion is for object's virtuals only, so Describe belongs on the
+        // interface.
+        //
+        // Why `_ => true` in OverridesObjectMember survives: an override always
+        // has a base declaration, and the collector walks base types folding
+        // their members in. Drop the override and the BASE's Describe is folded
+        // instead, deduped to the same signature. There is no reachable shape
+        // where an override is the only source of its own member — so the mutant
+        // is equivalent, not a gap, and no fixture could have killed it.
+        Assert.Contains("Describe", MemberNames<IDerivedFromUnmarked>());
+    }
+
+    [Fact]
+    public void A_public_field_is_not_mirrored()
+    {
+        // Interfaces cannot declare fields. Tag IS reached by ShouldMirror —
+        // GetMembers() returns fields — and the `default` arm refuses it.
+        //
+        // Why `default: return true` survives anyway: AppendMember's switch has
+        // no default arm, so a field that got past ShouldMirror is silently
+        // dropped when the interface is written. The rule is enforced twice.
+        // This test pins it at the boundary that matters (what ends up in the
+        // generated interface), which is true under either enforcement.
+        Assert.DoesNotContain("Tag", MemberNames<IDerivedFromUnmarked>());
+        Assert.Contains("Own", MemberNames<IDerivedFromUnmarked>());
     }
 
     [Fact]
