@@ -133,7 +133,12 @@ public class DiagnosticTests
             """), "NSGEN005");
 
         Assert.NotNull(diagnostic);
-        Assert.Contains("List<global::Probe.IAddr>", diagnostic.GetMessage());
+        Assert.Contains("List<Probe.IAddr>", diagnostic.GetMessage());
+
+        // …and `global::` is stripped, because this is prose in an error list,
+        // not generated code. Everything else stays fully qualified: the value of
+        // the message is that the suggestion can be copied out of it verbatim.
+        Assert.DoesNotContain("global::", diagnostic.GetMessage());
     }
 
     [Fact]

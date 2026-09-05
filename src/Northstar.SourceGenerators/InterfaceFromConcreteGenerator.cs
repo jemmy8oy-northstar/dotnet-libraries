@@ -385,8 +385,8 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
                         classSymbol.Locations.FirstOrDefault(),
                         classSymbol.Name,
                         "base " + mirroredBase.OriginalDefinition.Name,
-                        concrete.ToDisplayString(TypeFormat),
-                        SuggestInterfaceForm(arg)));
+                        Readable(concrete.ToDisplayString(TypeFormat)),
+                        Readable(SuggestInterfaceForm(arg))));
                 }
             }
         }
@@ -403,10 +403,17 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
                 owner.Locations.FirstOrDefault() ?? classSymbol.Locations.FirstOrDefault(),
                 classSymbol.Name,
                 memberName,
-                concrete.ToDisplayString(TypeFormat),
-                SuggestInterfaceForm(type)));
+                Readable(concrete.ToDisplayString(TypeFormat)),
+                Readable(SuggestInterfaceForm(type))));
         }
     }
+
+    // The rendered forms carry `global::` because generated CODE needs it to be
+    // unambiguous. A diagnostic is prose a developer reads in an error list and
+    // copies a fragment out of, so the prefix is noise there — everything else
+    // stays fully qualified, because the whole value of this message is that the
+    // suggestion is exact.
+    private static string Readable(string rendered) => rendered.Replace("global::", string.Empty);
 
     /// <summary>
     /// Is this member the implementation of a member of an interface that comes
