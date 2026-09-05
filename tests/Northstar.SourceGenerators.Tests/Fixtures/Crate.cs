@@ -3,12 +3,11 @@ using Northstar.SourceGenerators;
 namespace Northstar.SourceGenerators.Tests.Fixtures;
 
 /// <summary>
-/// Closes the invariant base. Its interface is expected to be
-/// <c>ICrateBase&lt;Addr&gt;</c> — the CONCRETE argument — and the class stays
-/// non-partial, because with no substitution there is nothing to bridge.
-/// That pair of facts is what makes the fallback observable rather than a claim.
+/// Closes the invariant base over the INTERFACE, so <c>ICrate</c> is
+/// <c>ICrateBase&lt;IAddr&gt;</c> and <c>Items</c> is a <c>List&lt;IAddr&gt;</c>
+/// — the type the previous design could not produce at all.
 /// </summary>
 [GenerateInterface]
-public class Crate : CrateBase<Addr>, ICrate
+public class Crate : CrateBase<IAddr>, ICrate
 {
 }

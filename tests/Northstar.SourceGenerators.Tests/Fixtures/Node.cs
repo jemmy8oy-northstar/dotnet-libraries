@@ -2,8 +2,11 @@ using Northstar.SourceGenerators;
 
 namespace Northstar.SourceGenerators.Tests.Fixtures;
 
-/// <summary>A tree node whose children are nodes of the same layer.</summary>
+/// <summary>
+/// A tree node whose children are nodes of the same layer, reached through the
+/// interface: <c>INode : INodeBase&lt;INode&gt;</c>, closed over itself.
+/// </summary>
 [GenerateInterface]
-public partial class Node : NodeBase<Node>, INode
+public class Node : NodeBase<INode>, INode
 {
 }

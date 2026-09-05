@@ -3,32 +3,34 @@ using Northstar.SourceGenerators;
 namespace Northstar.SourceGenerators.Tests.Fixtures;
 
 /// <summary>
-/// A DIRECT property at a mirrored type — the case James actually pointed at on
+/// A DIRECT member at a mirrored type — the case James actually pointed at on
 /// web-template#89 (<i>"why concrete addr here / Interfaces only in
-/// interfaces"</i>), and the one no fixture covered before this. Every other
-/// fixture reaches a mirrored type through a generic base's type argument.
+/// interfaces"</i>). Every other fixture reaches a mirrored type through a
+/// generic base's type argument.
 /// </summary>
 /// <remarks>
-/// <c>partial</c> because the generated <c>IOrder</c> declares <c>ShipTo</c> as
-/// <c>IAddr</c> while this class keeps it as <c>Addr</c>, so the generator writes
-/// an explicit implementation here to join the two. That requirement is reported
-/// as NSGEN003 if it is missing — it is not left to a confusing CS0535.
+/// Not <c>partial</c>, and nothing is generated into it: the members are already
+/// declared at the interface types, so the mirror can copy them verbatim.
+/// <para>
+/// <c>ShipsTo</c> is the member the previous design could not express. A
+/// generated bridge could widen a return but never a PARAMETER — declaring
+/// <c>ShipsTo(IAddr)</c> for a class that accepted only <c>Addr</c> promised
+/// something its narrowing cast had to break at runtime. Written by hand at the
+/// interface type it is simply true, so James's rule reaches the whole signature
+/// rather than the return half of it.
+/// </para>
 /// </remarks>
 [GenerateInterface]
-public partial class Order : IOrder
+public class Order : IOrder
 {
     public string Reference { get; set; } = "";
 
-    /// <summary>Concrete on the class, so System.Text.Json can still populate it.</summary>
-    public Addr ShipTo { get; set; } = new();
+    /// <summary>Declared at the interface, which is what removes the bridge.</summary>
+    public IAddr ShipTo { get; set; } = new Addr();
 
-    /// <summary>A method RETURN at a mirrored type. Safe to widen — the bridge
-    /// only ever upcasts on the way out, which is why returns substitute and
-    /// parameters do not.</summary>
-    public Addr Primary() => ShipTo;
+    /// <summary>A method RETURN at a mirrored type.</summary>
+    public IAddr Primary() => ShipTo;
 
-    /// <summary>A method PARAMETER at a mirrored type, deliberately left
-    /// concrete. Declaring it as <c>IAddr</c> would promise this class accepts
-    /// any IAddr when it accepts only Addr.</summary>
-    public bool ShipsTo(Addr candidate) => candidate.Line1 == ShipTo.Line1;
+    /// <summary>A method PARAMETER at a mirrored type.</summary>
+    public bool ShipsTo(IAddr candidate) => candidate.Line1 == ShipTo.Line1;
 }

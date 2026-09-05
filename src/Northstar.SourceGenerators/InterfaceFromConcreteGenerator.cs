@@ -47,11 +47,12 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
         /// write <c>: IMyClass</c> yourself, so the implements-relationship stays
         /// visible in the source you read.
         /// <para>
-        /// The class need not be <c>partial</c> unless the generated interface
-        /// declares one of its members at an INTERFACE type — a property, or a
-        /// method return, whose type is itself marked. Then the generator writes
-        /// an explicit implementation into the class to join the two, and says so
-        /// with NSGEN003 rather than leaving you a CS0535.
+        /// The generated interface mirrors what the class declares, VERBATIM. It
+        /// never rewrites a signature, so it never writes into your class and the
+        /// class never has to be <c>partial</c>. "Interfaces only in interfaces"
+        /// is therefore something you write and NSGEN005 checks: declare your
+        /// members — and close your generic bases — at the interface types, and
+        /// the mirror is interfaces all the way down.
         /// </para>
         /// </remarks>
         [global::System.AttributeUsage(global::System.AttributeTargets.Class, Inherited = false, AllowMultiple = false)]
@@ -80,29 +81,23 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
-    // A class only ever needs to be partial when the interface actually changed
-    // one of its member types — so this fires on the narrow case rather than on
-    // every marked class, and names the members that caused it so the fix is
-    // obvious from the message alone.
-    private static readonly DiagnosticDescriptor BridgeNeedsPartial = new(
-        id: "NSGEN003",
-        title: "[GenerateInterface] needs this class to be partial",
-        messageFormat: "'{0}' must be declared partial: its generated interface declares {1} at an interface type, " +
-            "which requires a generated explicit implementation on the class",
+    // "Interfaces only in interfaces" is a rule about what the AUTHOR declares,
+    // not a rewrite this generator performs. The mirror is verbatim, so the only
+    // way a concrete type reaches a generated interface is if the class put it
+    // there — and this says so at the member, naming the interface to use
+    // instead, rather than rewriting the signature into one the class no longer
+    // satisfies.
+    //
+    // Warning, not Error: the code compiles either way, so escalating is the
+    // consuming project's call. Every repo in this org sets
+    // TreatWarningsAsErrors, which is what makes the rule structural in practice.
+    private static readonly DiagnosticDescriptor ConcreteInInterfaceSurface = new(
+        id: "NSGEN005",
+        title: "[GenerateInterface] would put a concrete type in an interface",
+        messageFormat: "'{0}.{1}' is declared at '{2}', which has its own generated interface; " +
+            "declare it at '{3}' so the interface this class implements references only interfaces",
         category: "Northstar.SourceGenerators",
-        defaultSeverity: DiagnosticSeverity.Error,
-        isEnabledByDefault: true);
-
-    // Says out loud that the generator did LESS than "interfaces only in
-    // interfaces" here, and why. A silent fallback to concrete type arguments
-    // would look identical to the feature working.
-    private static readonly DiagnosticDescriptor BaseKeepsConcreteArguments = new(
-        id: "NSGEN004",
-        title: "[GenerateInterface] kept concrete type arguments on a generic base",
-        messageFormat: "'{0}' inherits '{1}', whose members put a type parameter inside an invariant generic; " +
-            "its interface therefore closes over the concrete type argument, not the mirror interface",
-        category: "Northstar.SourceGenerators",
-        defaultSeverity: DiagnosticSeverity.Info,
+        defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true);
 
     private static readonly DiagnosticDescriptor StaticTypeUnsupported = new(
@@ -129,13 +124,27 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
             .Where(static symbol => symbol is not null && HasGenerateInterfaceAttribute(symbol))
             .Select(static (symbol, _) => symbol!);
 
-        context.RegisterSourceOutput(classes, static (spc, symbol) => Emit(spc, symbol));
+        // Asked of the compilation rather than assumed of the target framework:
+        // the converter below is the difference between this shape working in a
+        // route and not, but emitting it into a project with no System.Text.Json
+        // reference would be a build error inside generated code — the worst way
+        // to deliver a feature. Projected to a BOOL before combining, so the
+        // incremental cache compares a bool and not a whole Compilation.
+        var hasJson = context.CompilationProvider.Select(static (compilation, _) =>
+            compilation.GetTypeByMetadataName("System.Text.Json.Serialization.JsonConverter`1") is not null);
+
+        context.RegisterSourceOutput(
+            classes.Combine(hasJson),
+            static (spc, pair) => Emit(spc, pair.Left, pair.Right));
     }
 
     private static bool HasGenerateInterfaceAttribute(INamedTypeSymbol symbol)
         => symbol.GetAttributes().Any(a => a.AttributeClass?.Name == AttributeName);
 
-    private static void Emit(SourceProductionContext context, INamedTypeSymbol classSymbol)
+    private static void Emit(
+        SourceProductionContext context,
+        INamedTypeSymbol classSymbol,
+        bool hasSystemTextJson)
     {
         if (classSymbol.ContainingType is not null)
         {
@@ -183,6 +192,23 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
           .Append(GeneratorVersion)
           .AppendLine("\")]");
 
+        // Declaring a member at an interface type is what removes the bridge, and
+        // it costs exactly one thing: System.Text.Json cannot pick a concrete type
+        // for an interface-typed property, so a request DTO stops deserialising.
+        // The generator made this interface FROM that concrete, so it knows both
+        // halves of the pair and can close the gap itself — no converter to
+        // register, no JsonSerializerOptions to thread through.
+        var converterName = EmitsConverter(classSymbol, hasSystemTextJson)
+            ? interfaceName + "JsonConverter"
+            : null;
+
+        if (converterName is not null)
+        {
+            sb.Append("[global::System.Text.Json.Serialization.JsonConverter(typeof(")
+              .Append(converterName)
+              .AppendLine("))]");
+        }
+
         sb.Append(accessibility).Append(" interface ").Append(interfaceName);
         AppendTypeParameters(sb, classSymbol.TypeParameters);
 
@@ -203,72 +229,17 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
 
         sb.AppendLine("}");
 
-        // The bridge: every member whose type the interface CHANGED needs an
-        // explicit implementation on the class, or the class does not satisfy
-        // its own mirror. Two sources — members this interface declares, and
-        // members it inherits from a mirrored base that has been closed over a
-        // substituted type argument (IPersonBase<Addr> becomes IPersonBase<IAddr>,
-        // so Address moves from Addr to IAddr without this class declaring it).
-        var bridges = new List<(string Interface, ISymbol Member)>();
-        var ownInterface = interfaceName + TypeParameterList(classSymbol.TypeParameters);
+        // The rule is enforced, not performed. Everything above mirrors what the
+        // class declares, so a concrete type in the interface can only have come
+        // from the author — reported here, at the member, with the interface to
+        // use instead. The generator never rewrites a signature, which is why
+        // there is no bridge, no `partial`, and no class this generator writes
+        // into.
+        ReportConcreteSurface(context, classSymbol, members, mirroredBase);
 
-        foreach (var member in members)
+        if (converterName is not null)
         {
-            if (NeedsBridge(member))
-            {
-                bridges.Add((ownInterface, member));
-            }
-        }
-
-        if (mirroredBase is not null)
-        {
-            var baseSubstituted = CanCloseOverMirrors(mirroredBase.OriginalDefinition);
-
-            if (!baseSubstituted && mirroredBase.TypeArguments.Any(t => MirrorOf(t) is not null))
-            {
-                context.ReportDiagnostic(Diagnostic.Create(
-                    BaseKeepsConcreteArguments,
-                    classSymbol.Locations.FirstOrDefault(),
-                    classSymbol.Name,
-                    mirroredBase.ToDisplayString()));
-            }
-
-            // When the base kept its concrete type arguments its interface
-            // declares the concrete types, so there is nothing to bridge. Asking
-            // this rather than assuming it is what stops the generator emitting
-            // an explicit implementation of a member no interface declares.
-            if (baseSubstituted)
-            {
-                var baseInterface = MirrorNameOf(mirroredBase);
-                foreach (var member in CollectMembers(mirroredBase, FindMirroredBase(mirroredBase)))
-                {
-                    if (NeedsBridge(member))
-                    {
-                        bridges.Add((baseInterface, member));
-                    }
-                }
-            }
-        }
-
-        if (bridges.Count > 0)
-        {
-            // Writing into the class is the whole reason this needs `partial`,
-            // and it is a real cost of "interfaces only in interfaces": before
-            // this, the generator only ever wrote a separate interface file and
-            // a marked class never had to be partial. Only classes that actually
-            // need a bridge pay it — hence NeedsBridge above rather than
-            // "is anything marked".
-            if (!IsPartial(classSymbol))
-            {
-                context.ReportDiagnostic(Diagnostic.Create(
-                    BridgeNeedsPartial,
-                    classSymbol.Locations.FirstOrDefault(),
-                    classSymbol.Name,
-                    string.Join(", ", bridges.Select(b => b.Member.Name))));
-                return;
-            }
-
-            AppendBridge(sb, classSymbol, bridges);
+            AppendJsonConverter(sb, classSymbol, interfaceName, converterName, accessibility);
         }
 
         // Type parameters make the name ambiguous on their own; arity keeps the
@@ -280,111 +251,204 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
         context.AddSource(hint, SourceText.From(sb.ToString(), Encoding.UTF8));
     }
 
-    private static bool IsPartial(INamedTypeSymbol symbol)
-        => symbol.DeclaringSyntaxReferences
-            .Select(r => r.GetSyntax())
-            .OfType<ClassDeclarationSyntax>()
-            .Any(d => d.Modifiers.Any(m => m.IsKind(SyntaxKind.PartialKeyword)));
-
-    private static string TypeParameterList(ImmutableArray<ITypeParameterSymbol> typeParameters)
-        => typeParameters.Length == 0
-            ? string.Empty
-            : "<" + string.Join(", ", typeParameters.Select(t => t.Name)) + ">";
-
     /// <summary>
-    /// Emits the explicit interface implementations that let the class keep its
-    /// concrete members while satisfying an interface declared over mirrors.
+    /// Should this class's mirror carry a JSON converter naming it as the
+    /// concrete to build?
     /// </summary>
     /// <remarks>
-    /// System.Text.Json ignores explicit implementations, which is what makes a
-    /// request DTO still round-trip with no custom converter — measured on a
-    /// real .NET 10 build before this was written, not assumed. The cast in a
-    /// setter is the one real trade-off: assigning a FOREIGN mirror through the
-    /// interface is a compile error under the old shape and an
-    /// InvalidCastException here. Loud either way, and only code that WRITES
-    /// through the interface can reach it.
+    /// Three refusals, each because the converter could not be written rather
+    /// than because it would be unwanted:
+    /// <list type="bullet">
+    /// <item>no System.Text.Json in the compilation — see the note in Initialize;</item>
+    /// <item>abstract, so there is nothing to construct. This is the whole
+    /// generic-template layer, and it is the right answer: nobody deserialises
+    /// <c>IPersonBase&lt;T&gt;</c>, they deserialise the closed type;</item>
+    /// <item>generic, which would need a JsonConverterFactory rather than a
+    /// converter, and no DTO in this shape is generic — the templates are.</item>
+    /// </list>
     /// </remarks>
-    private static void AppendBridge(
+    private static bool EmitsConverter(INamedTypeSymbol classSymbol, bool hasSystemTextJson)
+        => hasSystemTextJson
+            && !classSymbol.IsAbstract
+            && classSymbol.TypeParameters.Length == 0;
+
+    /// <summary>
+    /// Writes the converter that turns the mirror interface back into the one
+    /// concrete it was generated from.
+    /// </summary>
+    /// <remarks>
+    /// Asymmetric on purpose. READING has one right answer — this interface
+    /// exists because that class was marked, so that class is what to build.
+    /// WRITING must not cast: a foreign implementation is a legal value of an
+    /// interface-typed property, and a converter that cast it to the mirrored
+    /// concrete would throw on serialisation, re-creating on the read path
+    /// exactly the failure the generated bridge used to have on the write path.
+    /// Serialising the RUNTIME type is both correct and free.
+    /// </remarks>
+    private static void AppendJsonConverter(
         StringBuilder sb,
         INamedTypeSymbol classSymbol,
-        List<(string Interface, ISymbol Member)> bridges)
+        string interfaceName,
+        string converterName,
+        string accessibility)
     {
-        var accessibility = classSymbol.DeclaredAccessibility == Accessibility.Public ? "public" : "internal";
+        var concrete = classSymbol.ToDisplayString(TypeFormat);
 
         sb.AppendLine();
         sb.Append("[global::System.CodeDom.Compiler.GeneratedCode(\"")
           .Append(GeneratorName).Append("\", \"").Append(GeneratorVersion).AppendLine("\")]");
-        sb.Append(accessibility).Append(classSymbol.IsAbstract ? " abstract" : string.Empty)
-          .Append(" partial class ").Append(classSymbol.Name);
-        AppendTypeParameters(sb, classSymbol.TypeParameters);
-        sb.AppendLine();
-        AppendConstraints(sb, classSymbol.TypeParameters);
+        sb.Append(accessibility).Append(" sealed class ").Append(converterName)
+          .Append(" : global::System.Text.Json.Serialization.JsonConverter<").Append(interfaceName)
+          .AppendLine(">");
         sb.AppendLine("{");
+        sb.Append("    public override ").Append(interfaceName).AppendLine("? Read(")
+          .AppendLine("        ref global::System.Text.Json.Utf8JsonReader reader,")
+          .AppendLine("        global::System.Type typeToConvert,")
+          .AppendLine("        global::System.Text.Json.JsonSerializerOptions options)")
+          .Append("        => global::System.Text.Json.JsonSerializer.Deserialize<").Append(concrete)
+          .AppendLine(">(ref reader, options);");
+        sb.AppendLine();
+        sb.AppendLine("    public override void Write(")
+          .AppendLine("        global::System.Text.Json.Utf8JsonWriter writer,")
+          .Append("        ").Append(interfaceName).AppendLine(" value,")
+          .AppendLine("        global::System.Text.Json.JsonSerializerOptions options)")
+          .AppendLine("        => global::System.Text.Json.JsonSerializer.Serialize(writer, value, value.GetType(), options);");
+        sb.AppendLine("}");
+    }
 
-        foreach (var (iface, member) in bridges)
+    /// <summary>
+    /// Reports every place this class puts a mirrored CONCRETE type into the
+    /// surface its generated interface will mirror: a member's type, a method
+    /// parameter, or a type argument it closes its generic base over.
+    /// </summary>
+    /// <remarks>
+    /// This is the whole enforcement of "interfaces only in interfaces", and it
+    /// covers method PARAMETERS as well as returns — which the substituting
+    /// design could not. There, a parameter could not be widened, because
+    /// declaring <c>Describe(IAddr)</c> for a class that accepts only
+    /// <c>Addr</c> promises something the bridge's cast had to break at runtime.
+    /// Here the class declares <c>Describe(IAddr)</c> itself, so there is no
+    /// promise to break and nothing to cast. The contravariance problem was an
+    /// artefact of rewriting the signature, not of the rule.
+    /// </remarks>
+    private static void ReportConcreteSurface(
+        SourceProductionContext context,
+        INamedTypeSymbol classSymbol,
+        IEnumerable<ISymbol> members,
+        INamedTypeSymbol? mirroredBase)
+    {
+        foreach (var member in members)
         {
+            if (ImplementsADeclaredInterface(classSymbol, member))
+            {
+                continue;
+            }
+
             switch (member)
             {
                 case IPropertySymbol property:
-                    AppendBridgedProperty(sb, iface, property);
+                    Report(property, property.Type, property.Name);
+                    foreach (var p in property.Parameters)
+                    {
+                        Report(property, p.Type, property.Name);
+                    }
+
                     break;
+
                 case IMethodSymbol method:
-                    AppendBridgedMethod(sb, iface, method);
+                    Report(method, method.ReturnType, method.Name);
+                    foreach (var p in method.Parameters)
+                    {
+                        Report(method, p.Type, method.Name);
+                    }
+
+                    break;
+
+                case IEventSymbol evt:
+                    Report(evt, evt.Type, evt.Name);
                     break;
             }
         }
 
-        sb.AppendLine("}");
-    }
-
-    private static void AppendBridgedProperty(StringBuilder sb, string iface, IPropertySymbol property)
-    {
-        var concrete = property.Type.ToDisplayString(TypeFormat);
-        sb.Append("    ").Append(RenderForInterface(property.Type)).Append(' ')
-          .Append(iface).Append('.').Append(property.Name).Append(" { ");
-
-        if (property.GetMethod?.DeclaredAccessibility == Accessibility.Public)
+        // A generic base closed over a concrete puts that concrete straight into
+        // the generated interface's base list, where no member declaration would
+        // ever mention it. Missing this is how `IDomainPerson : IPersonBase<DomainAddr>`
+        // would slip through with every member looking clean.
+        if (mirroredBase is not null)
         {
-            sb.Append("get => ").Append(property.Name).Append("; ");
-        }
-
-        if (property.SetMethod?.DeclaredAccessibility == Accessibility.Public)
-        {
-            sb.Append(property.SetMethod.IsInitOnly ? "init => " : "set => ")
-              .Append(property.Name).Append(" = (").Append(concrete).Append(")value; ");
-        }
-
-        sb.AppendLine("}");
-    }
-
-    private static void AppendBridgedMethod(StringBuilder sb, string iface, IMethodSymbol method)
-    {
-        sb.Append("    ").Append(RenderForInterface(method.ReturnType)).Append(' ')
-          .Append(iface).Append('.').Append(method.Name).Append('(');
-        AppendParameters(sb, method.Parameters);
-        sb.Append(") => ").Append(method.Name).Append('(');
-
-        for (var i = 0; i < method.Parameters.Length; i++)
-        {
-            if (i > 0)
+            foreach (var arg in mirroredBase.TypeArguments)
             {
-                sb.Append(", ");
+                if (FindMirroredMention(arg) is { } concrete)
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        ConcreteInInterfaceSurface,
+                        classSymbol.Locations.FirstOrDefault(),
+                        classSymbol.Name,
+                        "base " + mirroredBase.OriginalDefinition.Name,
+                        concrete.ToDisplayString(TypeFormat),
+                        SuggestInterfaceForm(arg)));
+                }
+            }
+        }
+
+        void Report(ISymbol owner, ITypeSymbol type, string memberName)
+        {
+            if (FindMirroredMention(type) is not { } concrete)
+            {
+                return;
             }
 
-            var p = method.Parameters[i];
+            context.ReportDiagnostic(Diagnostic.Create(
+                ConcreteInInterfaceSurface,
+                owner.Locations.FirstOrDefault() ?? classSymbol.Locations.FirstOrDefault(),
+                classSymbol.Name,
+                memberName,
+                concrete.ToDisplayString(TypeFormat),
+                SuggestInterfaceForm(type)));
+        }
+    }
 
-            // Cast only where the interface widened the parameter — an untouched
-            // parameter needs no cast, and casting it anyway would be noise the
-            // reader has to discount.
-            if (MirrorOf(p.Type) is not null)
+    /// <summary>
+    /// Is this member the implementation of a member of an interface that comes
+    /// from a REFERENCED ASSEMBLY, and whose signature the author therefore
+    /// cannot widen?
+    /// </summary>
+    /// <remarks>
+    /// The escape hatch the rule genuinely needs. <c>IEquatable&lt;Basic&gt;</c>
+    /// fixes the parameter at the concrete type — widening it would simply stop
+    /// implementing the interface. Reporting it anyway would make the rule
+    /// unusable on any type with value semantics, which is not a judgement about
+    /// that type; it is the BCL's signature.
+    /// <para>
+    /// Deliberately limited to metadata. An interface in the consumer's own
+    /// source is one they can change, so it earns no exemption — and, decisively,
+    /// the mirror interfaces this generator writes are NOT metadata, so a class
+    /// declaring <c>: IBasic</c> does not exempt its own entire surface from the
+    /// rule. That is not a nicety: without this line every member of every marked
+    /// class is "an interface implementation" and the diagnostic never fires at all.
+    /// </para>
+    /// </remarks>
+    private static bool ImplementsADeclaredInterface(INamedTypeSymbol classSymbol, ISymbol member)
+    {
+        foreach (var iface in classSymbol.AllInterfaces)
+        {
+            if (!iface.OriginalDefinition.Locations.Any(l => l.IsInMetadata))
             {
-                sb.Append('(').Append(p.Type.ToDisplayString(TypeFormat)).Append(')');
+                continue;
             }
 
-            sb.Append(p.Name);
+            foreach (var required in iface.GetMembers())
+            {
+                var implementation = classSymbol.FindImplementationForInterfaceMember(required);
+                if (implementation is not null &&
+                    SymbolEqualityComparer.Default.Equals(implementation, member))
+                {
+                    return true;
+                }
+            }
         }
 
-        sb.AppendLine(");");
+        return false;
     }
 
     /// <summary>
@@ -410,9 +474,18 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
 
     /// <summary>
     /// Renders the mirror-interface reference for a (possibly constructed)
-    /// base type: <c>CustomerBase&lt;Address&gt;</c> becomes
-    /// <c>global::Ns.ICustomerBase&lt;global::Ns.IAddress&gt;</c>.
+    /// base type: <c>PersonBase&lt;IAddress&gt;</c> becomes
+    /// <c>global::Ns.IPersonBase&lt;global::Ns.IAddress&gt;</c>.
     /// </summary>
+    /// <remarks>
+    /// The type arguments are copied VERBATIM. Closing the base over interfaces
+    /// is the author's job — <c>class DomainPerson : PersonBase&lt;IDomainAddr&gt;</c>
+    /// — and doing it there is what makes the class satisfy its own mirror with
+    /// nothing generated into it. Substituting here instead is the design this
+    /// replaced: it produced an interface the class did not implement, which then
+    /// needed a bridge, which then needed <c>partial</c>. NSGEN005 reports a base
+    /// closed over a concrete rather than quietly rewriting it.
+    /// </remarks>
     private static string MirrorNameOf(INamedTypeSymbol baseType)
     {
         var ns = baseType.ContainingNamespace.IsGlobalNamespace
@@ -426,224 +499,114 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
             return name;
         }
 
-        var substitutable = CanCloseOverMirrors(baseType.OriginalDefinition);
-        var args = baseType.TypeArguments.Select(t => substitutable
-            ? RenderForInterface(t)
-            : t.ToDisplayString(TypeFormat));
+        var args = baseType.TypeArguments.Select(t => t.ToDisplayString(TypeFormat));
 
         return name + "<" + string.Join(", ", args) + ">";
     }
 
+
     /// <summary>
-    /// Can this generic base's interface safely be closed over MIRRORS of its
-    /// type arguments — <c>IPersonBase&lt;IAddr&gt;</c> rather than
-    /// <c>IPersonBase&lt;Addr&gt;</c>?
+    /// The first mirrored CONCRETE class mentioned anywhere in <paramref name="type"/>
+    /// — the type itself, an array element, or any type argument at any depth —
+    /// or null when there is none.
     /// </summary>
     /// <remarks>
-    /// Only if every member the base contributes can still be bridged after the
-    /// substitution. A member typed exactly <c>TAddress</c> can (the bridge casts
-    /// the value); one typed <c>IReadOnlyList&lt;TAddress&gt;</c> can, because
-    /// that interface is covariant; one typed <c>List&lt;TAddress&gt;</c> cannot,
-    /// because <c>List&lt;Addr&gt;</c> and <c>List&lt;IAddr&gt;</c> are unrelated
-    /// types and the explicit implementation would not compile.
+    /// James, web-template#89 (2026-08-15): <i>"Interfaces only in interfaces.
+    /// The concretes will also just have interfaces as the attribute types. But
+    /// in the service they can define the concrete which obviously inherits the
+    /// interface."</i>
     /// <para>
-    /// When the answer is no the base keeps its concrete type arguments — the
-    /// pre-existing behaviour — and NSGEN004 says so at the class, because
-    /// silently doing less than "interfaces only in interfaces" promises is
-    /// exactly the failure mode a generator should not have.
+    /// The walk is deliberately depth-first and variance-blind, which is the
+    /// difference between this and the substituting design it replaces. That one
+    /// had to refuse <c>List&lt;Addr&gt;</c>, because rewriting an INVARIANT
+    /// generic to <c>List&lt;IAddr&gt;</c> produced a bridge that would not
+    /// compile. Nothing is rewritten here, so nothing has to be refused: the
+    /// author writes <c>List&lt;IAddr&gt;</c> and the mirror copies it. His shape
+    /// is not a weaker version of the rule — it reaches cases the rewrite could
+    /// never express.
     /// </para>
     /// </remarks>
-    private static bool CanCloseOverMirrors(INamedTypeSymbol definition)
+    private static INamedTypeSymbol? FindMirroredMention(ITypeSymbol type)
     {
-        var current = (INamedTypeSymbol?)definition;
-        while (current is not null && current.SpecialType != SpecialType.System_Object)
-        {
-            foreach (var member in current.GetMembers())
-            {
-                if (!ShouldMirror(member))
-                {
-                    continue;
-                }
-
-                var type = member switch
-                {
-                    IPropertySymbol p => p.Type,
-                    IMethodSymbol m => m.ReturnType,
-                    IEventSymbol e => e.Type,
-                    _ => null,
-                };
-
-                if (type is not null && !SurvivesSubstitution(type))
-                {
-                    return false;
-                }
-            }
-
-            current = current.BaseType;
-        }
-
-        return true;
-    }
-
-    /// <summary>
-    /// Would a type mentioning the base's type parameters still be bridgeable if
-    /// those parameters were closed over mirror interfaces?
-    /// </summary>
-    private static bool SurvivesSubstitution(ITypeSymbol type)
-    {
-        // The whole type IS the parameter: the bridge casts the value, which is
-        // the case James's own PersonBase<TAddress>.Address exercises.
-        if (type is ITypeParameterSymbol)
-        {
-            return true;
-        }
-
-        if (!MentionsTypeParameter(type))
-        {
-            return true;
-        }
-
-        // Arrays are covariant, so T[] narrows to Addr[] on the way back in.
         if (type is IArrayTypeSymbol array)
         {
-            return SurvivesSubstitution(array.ElementType);
+            return FindMirroredMention(array.ElementType);
         }
 
-        if (type is INamedTypeSymbol { IsGenericType: true } generic)
-        {
-            var parameters = generic.OriginalDefinition.TypeParameters;
-            for (var i = 0; i < generic.TypeArguments.Length; i++)
-            {
-                var arg = generic.TypeArguments[i];
-                if (!MentionsTypeParameter(arg) && arg is not ITypeParameterSymbol)
-                {
-                    continue;
-                }
-
-                if (parameters[i].Variance != VarianceKind.Out || !SurvivesSubstitution(arg))
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        return false;
-    }
-
-    private static bool MentionsTypeParameter(ITypeSymbol type) => type switch
-    {
-        ITypeParameterSymbol => true,
-        IArrayTypeSymbol a => MentionsTypeParameter(a.ElementType),
-        INamedTypeSymbol { IsGenericType: true } g => g.TypeArguments.Any(MentionsTypeParameter),
-        _ => false,
-    };
-
-    /// <summary>
-    /// How a type is written INSIDE a generated interface: its mirror interface
-    /// if it has one, otherwise the type itself.
-    /// </summary>
-    /// <remarks>
-    /// James, web-template#89 (2026-08-15), on a generated interface exposing a
-    /// concrete <c>Addr</c>: <i>"why concrete addr here / Interfaces only in
-    /// interfaces. The concretes will also just have interfaces as the attribute
-    /// types. But in the service they can define the concrete which obviously
-    /// inherits the interface."</i>
-    /// <para>
-    /// Substitution is deliberately narrow: it applies when the type ITSELF is a
-    /// mirrored class (recursing through that type's own arguments), and NOT to
-    /// a mirrored class sitting inside some other generic. <c>List&lt;Addr&gt;</c>
-    /// stays <c>List&lt;Addr&gt;</c>, because <c>List&lt;T&gt;</c> is invariant:
-    /// rewriting it to <c>List&lt;IAddr&gt;</c> would produce a bridge whose cast
-    /// throws for every value, which is worse than a concrete reference. The rule
-    /// is "interfaces where an interface exists", not "rewrite every mention".
-    /// </para>
-    /// <para>
-    /// A type with no mirror is passed through unchanged — there is nothing to
-    /// name, and inventing one would be worse than a concrete reference.
-    /// </para>
-    /// </remarks>
-    private static string RenderForInterface(ITypeSymbol type)
-    {
-        if (MirrorOf(type) is { } mirror)
-        {
-            return mirror;
-        }
-
-        // A mirrored class sitting INSIDE another generic, e.g. a base's
-        // IReadOnlyList<Node> facing an interface that declares
-        // IReadOnlyList<INode>. Substituted only at a COVARIANT (`out`)
-        // position: at an invariant one, List<Node> and List<INode> have no
-        // conversion in either direction, so the bridge would not compile —
-        // a build error inside generated code, which is the worst way to
-        // report a limitation.
-        if (type is INamedTypeSymbol { IsGenericType: true } generic)
-        {
-            var parameters = generic.OriginalDefinition.TypeParameters;
-            var rendered = new string[generic.TypeArguments.Length];
-            var changed = false;
-
-            for (var i = 0; i < generic.TypeArguments.Length; i++)
-            {
-                var arg = generic.TypeArguments[i];
-                var concrete = arg.ToDisplayString(TypeFormat);
-                var substituted = RenderForInterface(arg);
-
-                if (substituted != concrete && parameters[i].Variance == VarianceKind.Out)
-                {
-                    rendered[i] = substituted;
-                    changed = true;
-                }
-                else
-                {
-                    rendered[i] = concrete;
-                }
-            }
-
-            if (changed)
-            {
-                var full = generic.ToDisplayString(TypeFormat);
-                var open = full.IndexOf('<');
-                var head = open >= 0 ? full.Substring(0, open) : full;
-                var nullable = generic.NullableAnnotation == NullableAnnotation.Annotated ? "?" : string.Empty;
-                return head + "<" + string.Join(", ", rendered) + ">" + nullable;
-            }
-        }
-
-        return type.ToDisplayString(TypeFormat);
-    }
-
-    /// <summary>Renders a type for the interface, substituting only when this
-    /// member is one the generator can bridge (see <see cref="CanBridge"/>).</summary>
-    private static string Render(ITypeSymbol type, bool substitute)
-        => substitute ? RenderForInterface(type) : type.ToDisplayString(TypeFormat);
-
-    /// <summary>
-    /// The mirror interface's name for <paramref name="type"/>, or null when the
-    /// type is not mirrored. Returning null rather than the concrete name is what
-    /// lets callers ask "did this change?" without comparing rendered strings.
-    /// </summary>
-    private static string? MirrorOf(ITypeSymbol type)
-    {
-        if (type is not INamedTypeSymbol named ||
-            named.TypeKind != TypeKind.Class ||
-            !HasGenerateInterfaceAttribute(named.OriginalDefinition))
+        if (type is not INamedTypeSymbol named)
         {
             return null;
         }
 
-        var ns = named.ContainingNamespace.IsGlobalNamespace
-            ? string.Empty
-            : "global::" + named.ContainingNamespace.ToDisplayString() + ".";
+        if (IsMirrored(named))
+        {
+            return named;
+        }
 
-        var name = ns + "I" + named.Name;
+        foreach (var arg in named.TypeArguments)
+        {
+            if (FindMirroredMention(arg) is { } found)
+            {
+                return found;
+            }
+        }
 
-        return named.TypeArguments.Length == 0
-            ? name
-            : name + "<" + string.Join(", ", named.TypeArguments.Select(RenderForInterface)) + ">";
+        return null;
     }
 
+    /// <summary>
+    /// The same type with every mirrored concrete swapped for its interface —
+    /// used ONLY to write the fix into the NSGEN005 message, never to emit code.
+    /// </summary>
+    /// <remarks>
+    /// A diagnostic that says "this is wrong" and a diagnostic that says "write
+    /// <c>List&lt;IAddr&gt;</c>" are different tools. The second is the whole
+    /// value of enforcing the rule rather than performing it, so the suggestion
+    /// is computed rather than hand-waved.
+    /// </remarks>
+    private static string SuggestInterfaceForm(ITypeSymbol type)
+    {
+        if (type is IArrayTypeSymbol array)
+        {
+            return SuggestInterfaceForm(array.ElementType) + "[]";
+        }
+
+        if (type is not INamedTypeSymbol named)
+        {
+            return type.ToDisplayString(TypeFormat);
+        }
+
+        var nullable = named.NullableAnnotation == NullableAnnotation.Annotated && !named.IsValueType
+            ? "?"
+            : string.Empty;
+
+        if (IsMirrored(named))
+        {
+            var ns = named.ContainingNamespace.IsGlobalNamespace
+                ? string.Empty
+                : "global::" + named.ContainingNamespace.ToDisplayString() + ".";
+
+            var mirror = ns + "I" + named.Name;
+
+            return named.TypeArguments.Length == 0
+                ? mirror + nullable
+                : mirror + "<" + string.Join(", ", named.TypeArguments.Select(SuggestInterfaceForm)) + ">" + nullable;
+        }
+
+        if (named.TypeArguments.Length == 0)
+        {
+            return named.ToDisplayString(TypeFormat);
+        }
+
+        var full = named.ToDisplayString(TypeFormat);
+        var open = full.IndexOf('<');
+        var head = open >= 0 ? full.Substring(0, open) : full;
+
+        return head + "<" + string.Join(", ", named.TypeArguments.Select(SuggestInterfaceForm)) + ">" + nullable;
+    }
+
+    private static bool IsMirrored(INamedTypeSymbol type)
+        => type.TypeKind == TypeKind.Class && HasGenerateInterfaceAttribute(type.OriginalDefinition);
     /// <summary>
     /// Public instance members to mirror. Walks up the base chain until it hits
     /// a mirrored base (whose interface we inherit instead) or object.
@@ -773,92 +736,31 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
         _ => member.Kind + ":" + member.Name,
     };
 
-    /// <summary>
-    /// Can this member's concrete signature be bridged by a generated explicit
-    /// interface implementation? Substitution is applied ONLY where the answer
-    /// is yes, so the generator never emits an interface the class cannot
-    /// satisfy.
-    /// </summary>
-    /// <remarks>
-    /// Excluded, each for a reason a cast cannot fix:
-    /// <list type="bullet">
-    /// <item>indexers — the bridge would have to cast the ARGUMENTS as well as
-    /// the value, and an argument cast changes when the call fails rather than
-    /// what it returns;</item>
-    /// <item>generic methods — the substitution would have to be re-decided per
-    /// instantiation, which is not knowable at generation time;</item>
-    /// <item>events — add/remove take a delegate, and a delegate over IAddr is
-    /// not the same object as one over Addr, so unsubscribe would silently
-    /// fail to match.</item>
-    /// </list>
-    /// These keep their concrete types in the interface. That is a real gap in
-    /// "interfaces only in interfaces" and is stated rather than hidden.
-    /// <para>
-    /// METHOD PARAMETERS are also left concrete, and that one was a correction
-    /// forced by the compiler rather than a design choice. A return type is
-    /// covariant — the bridge widens, and cannot fail. A parameter is
-    /// contravariant: declaring <c>Describe(IAddr)</c> promises the class accepts
-    /// ANY IAddr when it accepts only Addr, so the bridge's narrowing cast throws
-    /// on every call from a foreign implementation. The first build with
-    /// parameters substituted turned the fixture's <c>Equals(Basic?)</c> into
-    /// <c>Equals(IBasic?)</c> — an Equals that throws InvalidCastException, which
-    /// is worse than the concrete reference it replaced. James's rule was stated
-    /// over the DATA surface ("the concretes will also just have interfaces as
-    /// the attribute types"); extending it to parameters was my inference, and
-    /// it does not survive being run.
-    /// </para>
-    /// </remarks>
-    private static bool CanBridge(ISymbol member) => member switch
-    {
-        IPropertySymbol p => !p.IsIndexer,
-        IMethodSymbol m => m.TypeParameters.Length == 0,
-        _ => false,
-    };
-
-    /// <summary>
-    /// True when rendering this member for an interface actually changes a type
-    /// — the only case that needs a bridge, and the only case that forces the
-    /// class to be <c>partial</c>. Asked, not assumed.
-    /// </summary>
-    private static bool NeedsBridge(ISymbol member)
-    {
-        if (!CanBridge(member))
-        {
-            return false;
-        }
-
-        return member switch
-        {
-            IPropertySymbol p => Changes(p.Type),
-            IMethodSymbol m => Changes(m.ReturnType),
-            _ => false,
-        };
-    }
-
-    private static bool Changes(ITypeSymbol type)
-        => RenderForInterface(type) != type.ToDisplayString(TypeFormat);
-
+    // Every member is rendered VERBATIM — there is no `substitute` switch here
+    // and no member kind the generator treats specially. The old design needed
+    // one (indexers, generic methods and events could not be bridged, so their
+    // types were left concrete while everything else was rewritten); mirroring
+    // what the author declared removes the distinction along with the bridge.
     private static void AppendMember(StringBuilder sb, ISymbol member)
     {
-        var substitute = CanBridge(member);
         switch (member)
         {
             case IPropertySymbol property:
-                AppendProperty(sb, property, substitute);
+                AppendProperty(sb, property);
                 break;
             case IEventSymbol evt:
                 sb.Append("    event ").Append(evt.Type.ToDisplayString(TypeFormat))
                   .Append(' ').Append(evt.Name).AppendLine(";");
                 break;
             case IMethodSymbol method:
-                AppendMethod(sb, method, substitute);
+                AppendMethod(sb, method);
                 break;
         }
     }
 
-    private static void AppendProperty(StringBuilder sb, IPropertySymbol property, bool substitute)
+    private static void AppendProperty(StringBuilder sb, IPropertySymbol property)
     {
-        sb.Append("    ").Append(Render(property.Type, substitute)).Append(' ');
+        sb.Append("    ").Append(property.Type.ToDisplayString(TypeFormat)).Append(' ');
 
         if (property.IsIndexer)
         {
@@ -888,9 +790,9 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
         sb.AppendLine("}");
     }
 
-    private static void AppendMethod(StringBuilder sb, IMethodSymbol method, bool substitute)
+    private static void AppendMethod(StringBuilder sb, IMethodSymbol method)
     {
-        sb.Append("    ").Append(Render(method.ReturnType, substitute))
+        sb.Append("    ").Append(method.ReturnType.ToDisplayString(TypeFormat))
           .Append(' ').Append(method.Name);
 
         AppendTypeParameters(sb, method.TypeParameters);
@@ -910,9 +812,12 @@ public sealed class InterfaceFromConcreteGenerator : IIncrementalGenerator
         sb.AppendLine(";");
     }
 
-    // Parameters are always rendered concrete — see the contravariance note on
-    // CanBridge. There is deliberately no `substitute` switch here, so no future
-    // caller can turn it back on without reading that note.
+    // Parameters are copied verbatim like everything else. Under the substituting
+    // design this method carried a warning not to widen them — a widened parameter
+    // promised the class accepted any IAddr when it accepted only Addr, and the
+    // bridge's narrowing cast threw on every call from a foreign implementation.
+    // That was a property of the rewrite, not of the rule: the author now writes
+    // `Describe(IAddr)` and the class means it.
     private static void AppendParameters(
         StringBuilder sb,
         ImmutableArray<IParameterSymbol> parameters)
