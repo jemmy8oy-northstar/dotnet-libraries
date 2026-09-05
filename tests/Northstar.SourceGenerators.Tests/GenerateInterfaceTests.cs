@@ -1,6 +1,7 @@
 using System.CodeDom.Compiler;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Northstar.SourceGenerators.Tests.Fixtures;
 
 namespace Northstar.SourceGenerators.Tests;
@@ -64,7 +65,12 @@ public class GenerateInterfaceTests
             .OrderBy(n => n)
             .ToArray();
 
-        Assert.Empty(handWritten);
+        // IProbe is the one deliberate exception, listed rather than filtered out
+        // by a rule: Signal needs an interface to implement EXPLICITLY, and a
+        // generated mirror is never implemented that way. Naming it here means
+        // adding a second hand-written interface fails this test and has to be
+        // argued for, which is the point of the assertion.
+        Assert.Equal(["IProbe"], handWritten);
     }
 
     // ----------------------------------------------------------- what's in
@@ -284,6 +290,10 @@ public class GenerateInterfaceTests
         var withExplicitImplementations = marked
             .SelectMany(t => t.GetInterfaces()
                 .Where(i => i.Namespace == typeof(Basic).Namespace)
+                // GENERATED interfaces only. A hand-written one (IProbe) may well
+                // be implemented explicitly — that is a choice the author made,
+                // and this test is about what the GENERATOR writes.
+                .Where(i => i.GetCustomAttribute<GeneratedCodeAttribute>() is not null)
                 .Where(i => t.GetInterfaceMap(i).TargetMethods.Any(m => m.IsPrivate))
                 .Select(i => $"{t.Name} -> {i.Name}"))
             .ToArray();
@@ -389,6 +399,59 @@ public class GenerateInterfaceTests
         Assert.Equal(
             typeof(Coin),
             typeof(ICoin).GetMethod(nameof(Coin.Equals), [typeof(Coin)])!.GetParameters()[0].ParameterType);
+    }
+
+    // ------------------------------------- member kinds nothing else exercises
+    // Every test below exists because a mutation survived: the rule was written,
+    // asserted in prose, and had no fixture that could tell it from its opposite
+    // ([[an-uncaught-mutation-is-a-finding]]).
+
+    [Fact]
+    public void An_event_is_mirrored()
+    {
+        // The README has claimed this since the generator was written and no
+        // fixture had an event, so `case IEventSymbol: return true` could be
+        // flipped to `false` with the whole suite still green.
+        var evt = typeof(ISignal).GetEvent(nameof(Signal.Fired));
+        Assert.NotNull(evt);
+        Assert.Equal(typeof(EventHandler), evt.EventHandlerType);
+    }
+
+    [Fact]
+    public void An_explicit_interface_implementation_is_not_mirrored()
+    {
+        // It is already tied to another interface, so restating it would put a
+        // member on ISignal that Signal does not publicly have. Covered by
+        // accident until the bridge was deleted — the bridge WAS an explicit
+        // implementation, on several fixtures at once.
+        Assert.DoesNotContain("Probe", MemberNames<ISignal>());
+        Assert.Contains("Raise", MemberNames<ISignal>());
+    }
+
+    [Fact]
+    public void A_property_with_a_public_setter_and_a_private_getter_is_mirrored()
+    {
+        // "at least one accessor is public" is two clauses, and every other
+        // fixture satisfies the first — so the second had never been the reason
+        // for an answer and could be inverted unnoticed.
+        var token = typeof(ISignal).GetProperty(nameof(Signal.Token));
+        Assert.NotNull(token);
+        Assert.False(token.CanRead);
+        Assert.True(token.CanWrite);
+    }
+
+    [Fact]
+    public void An_abstract_class_gets_no_json_converter_and_a_concrete_one_does()
+    {
+        // The converter rule is "not abstract AND not generic". Every abstract
+        // fixture was also generic and vice versa, so `&&` and `||` agreed
+        // everywhere. AbstractSignal is abstract and NOT generic, which is the
+        // only shape that tells them apart.
+        Assert.Null(typeof(IAbstractSignal).GetCustomAttribute<JsonConverterAttribute>());
+        Assert.NotNull(typeof(IAddr).GetCustomAttribute<JsonConverterAttribute>());
+
+        // …and the template layer, which is both.
+        Assert.Null(typeof(IPersonBase<>).GetCustomAttribute<JsonConverterAttribute>());
     }
 
     // ----------------------------------------------- the one cost, measured

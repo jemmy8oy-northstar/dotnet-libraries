@@ -192,6 +192,29 @@ public class DiagnosticTests
     }
 
     [Fact]
+    public void The_exemption_covers_only_the_member_the_referenced_interface_fixes()
+    {
+        // The exemption is per MEMBER, not per class. A mutation turning the
+        // "is this the implementation of that member?" check into an `||`
+        // exempted every member of any class that implements any referenced
+        // interface — and survived, because no fixture had a class that both
+        // implements one AND declares a concrete elsewhere.
+        var diagnostic = Find(Probe("""
+            [GenerateInterface] public class Addr { public string Line1 { get; set; } = ""; }
+            [GenerateInterface] public class Coin : System.IEquatable<Coin>
+            {
+                public int Pence { get; set; }
+                public Addr Mint { get; set; } = new();
+                public bool Equals(Coin? other) => other?.Pence == Pence;
+            }
+            """), "NSGEN005");
+
+        Assert.NotNull(diagnostic);
+        Assert.Contains("Mint", diagnostic.GetMessage());
+        Assert.DoesNotContain("Equals", diagnostic.GetMessage());
+    }
+
+    [Fact]
     public void The_exemption_does_not_extend_to_the_generators_own_mirrors()
     {
         // The boundary that makes the exemption safe, and the one that would
